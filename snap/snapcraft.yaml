@@ -1,0 +1,97 @@
+name: pi-kernel-optee
+adopt-info: kernel
+build-base: core24
+type: kernel
+grade: stable
+confinement: strict
+summary: Ubuntu Core Raspberry Pi kernel with OP-TEE FDE support
+description: |
+  Kernel snap para o Raspberry Pi (variante 'raspi') com suporte a Full Disk
+  Encryption via OP-TEE. O kernel é recompilado com TEE/OPTEE/DM_CRYPT builtin
+  (o pi-kernel de stock não tem OP-TEE) e o initramfs embute a libteec, para o
+  snapd (>= 2.72) selar/abrir a chave LUKS no arranque falando diretamente com a
+  TA de FDE (que vive no firmware OP-TEE do gadget).
+
+platforms:
+  arm64:
+    build-on: [arm64]
+    build-for: [arm64]
+
+parts:
+  optee-client:
+    plugin: nil
+    stage-packages:
+      - libteec1t64
+    override-build: |
+      craftctl default
+      tri="${CRAFT_ARCH_TRIPLET_BUILD_FOR}"
+      mkdir -p "${CRAFT_PART_INSTALL}/addons/usr/lib/${tri}"
+      cp -a "${CRAFT_PART_INSTALL}/usr/lib/${tri}/"libteec.so* \
+        "${CRAFT_PART_INSTALL}/addons/usr/lib/${tri}/"
+  kernel:
+    plugin: kernel
+    source: https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux-raspi/+git/noble
+    source-type: git
+    source-tag: Ubuntu-raspi-6.8.0-1057.61
+    source-depth: 1
+    kernel-ubuntu-kconfigflavour: raspi
+    kernel-kconfigs:
+      - CONFIG_TEE=y
+      - CONFIG_OPTEE=y
+      - CONFIG_MD=y
+      - CONFIG_BLK_DEV_DM=m
+      - CONFIG_DM_CRYPT=m
+      - CONFIG_CRYPTO_XTS=m
+    build-packages:
+      - gcc
+      - gcc-13
+    stage-packages:
+      - linux-firmware
+    override-build: |
+      craftctl default
+      kver="$(basename "${CRAFT_PART_INSTALL}/lib/modules/"*)"
+      craftctl set version="$kver"
+      cfg="$(ls "${CRAFT_PART_INSTALL}/config-"* 2>/dev/null | head -1)"
+      for opt in CONFIG_TEE CONFIG_OPTEE; do
+        grep -q "^${opt}=y" "$cfg" || { echo "ERRO FDE: ${opt} não é =y"; grep "${opt}" "$cfg" || echo "  (ausente)"; exit 1; }
+      done
+      check_fde() {
+        if grep -q "^$1=y" "$cfg"; then echo "  $2: builtin ($1=y)";
+        elif find "${CRAFT_PART_INSTALL}/modules" "${CRAFT_PART_INSTALL}/lib/modules" -name "$2.ko*" 2>/dev/null | grep -q .; then echo "  $2: módulo (.ko) → vai para o initrd";
+        else echo "ERRO FDE: $2 nem builtin nem módulo ($1)"; exit 1; fi
+      }
+      check_fde CONFIG_DM_CRYPT   dm-crypt
+      check_fde CONFIG_CRYPTO_XTS xts
+      echo "OK FDE: TEE/OPTEE builtin; dm-crypt/xts disponíveis"
+    override-prime: |
+      craftctl default
+      "${CRAFT_STAGE}/trim-firmware" "${CRAFT_PRIME}" || true
+      vmlinuz="$(ls "${CRAFT_PRIME}/"vmlinuz-* 2>/dev/null | head -1)"
+      if [ -n "$vmlinuz" ]; then
+        if gzip -t "$vmlinuz" 2>/dev/null; then
+          zcat "$vmlinuz" > "${CRAFT_PRIME}/kernel.img"
+        else
+          cp "$vmlinuz" "${CRAFT_PRIME}/kernel.img"
+        fi
+        rm -f "${CRAFT_PRIME}/"vmlinuz-*
+      fi
+
+  firmware:
+    after: [kernel]
+    plugin: dump
+    source: https://git.launchpad.net/canonical-kernel-snaps
+    source-depth: 1
+    source-type: git
+    source-branch: main
+    prime:
+      - -*
+
+  initrd:
+    after: [firmware, kernel, optee-client]
+    plugin: initrd
+    initrd-build-efi-image: false
+    initrd-modules:
+      - dm_crypt
+      - sdhci_brcmstb
+    initrd-addons:
+      - usr/lib/${CRAFT_ARCH_TRIPLET_BUILD_FOR}/libteec.so*
