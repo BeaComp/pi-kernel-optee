@@ -1,72 +1,214 @@
 # pi-kernel-optee
 
-A custom Ubuntu Core **kernel snap** for the Raspberry Pi 5, built with OP-TEE
-support. It exists because the officially published `pi-kernel` snap does not
-include OP-TEE, and this project needs it for a disk-encryption proof of
-concept anchored in the Arm TrustZone secure world.
+Custom Ubuntu Core kernel snap for Raspberry Pi with OP-TEE support.
 
-## Why a separate snap
+This project provides a modified `pi-kernel` snap based on the Ubuntu
+`linux-raspi` source tree. The kernel is built with the configuration required
+to access OP-TEE from Linux and to support encrypted storage used by the
+prototype.
 
-The stock `pi-kernel` is compiled from
-[`linux-raspi`](https://git.launchpad.net/~ubuntu-kernel/ubuntu/+source/linux-raspi/+git/noble),
-Canonical's kernel fork for the Raspberry Pi, without the TEE/OP-TEE drivers
-enabled. Rather than patch or fork the published snap, `pi-kernel-optee`
-rebuilds `linux-raspi` from source with those drivers compiled in, using
-Snapcraft's [kernel plugin](https://snapcraft.io/docs/the-kernel-plugin).
+The resulting snap is used as the kernel component of the Ubuntu Core fleet
+image described in the main project.
 
-## What it changes
+## Why a custom kernel?
 
-| Change | Purpose |
-|---|---|
-| `CONFIG_TEE=y`, `CONFIG_OPTEE=y` (built in, not modules) | Expose `/dev/tee0` at boot, so user space can talk to the secure world |
-| `CONFIG_DM_CRYPT=y` (built in) | Provides the device-mapper target used to encrypt the storage volumes |
-| Source pinned to tag `Ubuntu-raspi-6.8.0-1057.61` | Matches the version of the `pi-kernel` it replaces on the device, which `snapd` otherwise requires |
-| OP-TEE client library (`libteec`) injected into the initramfs | Lets `snap-bootstrap` reach the secure world during early boot, before the main system starts |
+The standard `pi-kernel` snap used by Ubuntu Core for Raspberry Pi does not
+provide all the kernel configuration and build-time components required by
+this prototype. Therefore, a custom kernel snap, `pi-kernel-optee`, was
+developed.
 
-Building these three kconfig options in is not enough on its own — the exact
-`snapcraft.yaml` configuration (cross toolchain, additional apt repository for
-`arm64` packages, the `firmware`/`optee-client`/`initrd` parts that stage
-`libteec` and trim the firmware) is documented in the dissertation's
-Appendix on the gadget and kernel build.
+The custom kernel includes, among other changes:
 
-The armstub (Arm Trusted Firmware + OP-TEE) and the device-tree overlay that
-expose the TEE node to the kernel are **not** produced by this snap — they are
-supplied by the gadget snap and injected into this snap's `dtbs` asset by a
-post-build repacking step, run after `snapcraft pack` completes.
+- Linux support for the TEE subsystem and OP-TEE;
+- `dm-crypt` support for encrypted storage;
+- the kernel source version required for compatibility with the installed
+  `snapd` version;
+- OP-TEE client support in the initramfs, allowing the boot process to
+  communicate with the secure world before the root filesystem is mounted.
 
-## Building
+The modifications are implemented on top of Ubuntu's `linux-raspi` source tree.
 
-Cross-building this snap on an `amd64` host under `arm64` emulation
-repeatedly failed while unpacking the firmware. The snap is instead built
-**natively**, on a Raspberry Pi 5 running Ubuntu Server 24.04, with no
-emulation involved:
+## Build environment
+
+The kernel snap is built **natively on a Raspberry Pi 5 running Ubuntu Server
+24.04 LTS**.
+
+A native ARM64 build is used because attempts to build the snap on an AMD64
+machine using ARM64 emulation repeatedly failed while unpacking the Raspberry
+Pi firmware during the Snapcraft build process.
+
+For this reason, the build should be performed on an ARM64 machine, preferably
+a Raspberry Pi 5.
+
+The build does not use emulation.
+
+## Prerequisites
+
+The build machine must have:
+
+- ARM64 architecture;
+- Ubuntu Server 24.04 LTS or a compatible Ubuntu environment;
+- Snapcraft installed;
+- sufficient storage space for the kernel build and intermediate files.
+
+Check the architecture with:
 
 ```bash
-# Build on an ARM64 machine (Raspberry Pi 5 with Ubuntu Server 24.04),
-# natively, WITHOUT emulation:
-sudo snap refresh snapcraft --classic --channel=9.x/stable
-sudo snapcraft pack --enable-experimental-plugins --destructive-mode --verbosity verbose
+uname -m
 ```
 
-- `--destructive-mode` builds directly on the host instead of spinning up a
-  nested LXD container, which is unnecessary when the host already matches
-  the target architecture.
-- `--enable-experimental-plugins` is required because the `kernel` plugin
-  used here is still experimental in this Snapcraft channel.
-- The build is resource-heavy (RAM and CPU) and takes over an hour.
+The expected result is:
 
-The result is `pi-kernel-optee_6.8.0-1057-raspi_arm64.snap`.
+```
+aarch64
+```
 
-## Using the snap
+## Build procedure
 
-This snap is not published to the Snap Store, so it cannot be referenced by
-name in the model assertion the way the gadget is. The model still declares
-`pi-kernel`, the officially published kernel, by its Store snap-id. At image
-build time, the fleet-image pipeline sideloads this local snap in place of
-that entry, passing it to `ubuntu-image` with an explicit `--snap` argument
-and the `--allow-snapd-kernel-mismatch` flag, which is required because the
-sideloaded snap's identity does not match the `pi-kernel` entry declared in
-the model.
+### 1. Clone the repository
 
-See the [`ubuntu-core-builder`](https://github.com/BeaComp/ubuntu-core-builder)
-repository for the full image-build pipeline that consumes this snap.
+On the ARM64 build machine, clone the repository:
+
+```bash
+git clone https://github.com/BeaComp/pi-kernel-optee.git
+```
+
+Enter the project directory:
+
+```bash
+cd pi-kernel-optee
+```
+
+### 2. Update Snapcraft
+
+The kernel snap is built using the Snapcraft 9.x channel:
+
+```bash
+sudo snap refresh snapcraft --classic --channel=9.x/stable
+```
+
+Check the installed version:
+
+```bash
+snapcraft --version
+```
+
+### 3. Build the kernel snap
+
+Run Snapcraft in destructive mode:
+
+```bash
+sudo snapcraft pack --enable-experimental-plugins \
+  --destructive-mode \
+  --verbosity verbose
+```
+
+The build uses the experimental kernel plugin provided by Snapcraft, hence the
+`--enable-experimental-plugins` option.
+
+The `--destructive-mode` option causes Snapcraft to perform the build directly
+on the host machine rather than creating an additional isolated build
+environment. This is required for the native Raspberry Pi build used in this
+project.
+
+The build may take more than one hour on a Raspberry Pi 5.
+
+### 4. Build output
+
+After a successful build, Snapcraft produces an ARM64 kernel snap similar to:
+
+```
+pi-kernel-optee_6.8.0-1057-raspi_arm64.snap
+```
+
+This snap can then be used as the custom kernel component when generating the
+Ubuntu Core fleet image.
+
+## Snap structure
+
+The `snapcraft.yaml` is organized into several parts, each responsible for
+building or providing one component required by the final kernel snap.
+
+The main parts are:
+
+### kernel
+
+This is the main kernel build.
+
+It uses the Ubuntu `linux-raspi` source tree as the base and applies the
+configuration changes required by this project, including:
+
+```
+CONFIG_TEE=y
+CONFIG_OPTEE=y
+CONFIG_DM_CRYPT=y
+```
+
+The part also fixes the kernel source revision to the version compatible with
+the target Ubuntu Core environment.
+
+### Firmware
+
+The firmware-related part provides the Raspberry Pi firmware components
+required by the resulting kernel snap.
+
+These files are included in the final snap so that the generated image
+contains the firmware expected by the Raspberry Pi boot process.
+
+### OP-TEE client
+
+The OP-TEE client components provide the userspace interface required to
+communicate with OP-TEE.
+
+In this project, the OP-TEE client library is also made available to the
+initramfs so that the early boot environment can communicate with the secure
+world before the normal Ubuntu Core system is started.
+
+### Initramfs
+
+The initramfs contains the components required during the early boot stage.
+
+It includes the OP-TEE client library and the components necessary for the
+prototype's encrypted-storage workflow. During boot, `snap-bootstrap`
+communicates with OP-TEE to obtain the key required to unlock the LUKS2
+encrypted storage before the normal system startup continues.
+
+### Boot integration
+
+The generated kernel snap is part of a boot chain in which the firmware starts
+the Arm Trusted Firmware (BL31), which initializes the platform and enters the
+secure world. OP-TEE runs as BL32.
+
+The Linux kernel and initramfs are then started. During the early boot
+process, `snap-bootstrap` communicates with OP-TEE through the OP-TEE client
+interface. The key returned by the secure environment is used to unlock the
+LUKS2 encrypted storage, allowing Ubuntu Core to continue booting.
+
+The detailed boot-chain integration and its role in the prototype are
+described in the dissertation.
+
+## Result
+
+The main artifact generated by this repository is:
+
+```
+pi-kernel-optee_6.8.0-1057-raspi_arm64.snap
+```
+
+This snap is consumed by the Ubuntu Core image build pipeline of the main
+project.
+
+## Repository contents
+
+The repository contains the Snapcraft configuration and the modifications
+required to build the custom kernel snap. The complete configuration is kept
+in the repository to make the build reproducible.
+
+The resulting `.snap` package is generated locally and is not required to be
+stored in the repository.
+
+## Related project
+
+This repository is part of the SMARTLIGHT gateway prototype. The custom
+kernel provides the OP-TEE support required by the encrypted-storage and
+secure-boot integration implemented in the gateway image.
